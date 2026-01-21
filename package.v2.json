@@ -338,14 +338,15 @@
     }
   },
   "MediaRelease": {
-    "name": "影视将映订阅",
+    "name": "影视将映订阅Test",
     "description": "监控未上线影视作品，自动添加订阅。",
     "labels": "订阅",
-    "version": "1.3",
+    "version": "1.4",
     "icon": "https://raw.githubusercontent.com/thsrite/MoviePilot-Plugins/main/icons/mediarelease.png",
-    "author": "thsrite",
+    "author": "Lwore",
     "level": 1,
     "history": {
+      "v1.4": "订阅所有季",
       "v1.3": "优化执行周期输入，需要MoviePilot v2.2.1+",
       "v1.2": "兼容v2",
       "v1.1": "bug修复",
