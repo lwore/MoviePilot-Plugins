@@ -31,9 +31,9 @@ class MediaRelease(_PluginBase):
     # 插件版本
     plugin_version = "1.4"
     # 插件作者
-    plugin_author = "thsrite"
+    plugin_author = "lwore"
     # 作者主页
-    author_url = "https://github.com/thsrite"
+    author_url = "https://github.com/lwore"
     # 插件配置项ID前缀
     plugin_config_prefix = "mediarelease_"
     # 加载顺序
