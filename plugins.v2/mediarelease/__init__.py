@@ -23,7 +23,7 @@ from app.utils.string import StringUtils
 
 class MediaRelease(_PluginBase):
     # 插件名称
-    plugin_name = "影视将映订阅"
+    plugin_name = "影视将映订阅Test"
     # 插件描述
     plugin_desc = "监控未上线影视作品，自动添加订阅。"
     # 插件图标
