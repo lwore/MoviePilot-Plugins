@@ -337,7 +337,7 @@
       "v1.0": "监控上传任务，检测是否有异常，发送通知"
     }
   },
-  "MediaReleaseTest": {
+  "MediaRelease": {
     "name": "影视将映订阅Test",
     "description": "监控未上线影视作品，自动添加订阅。",
     "labels": "订阅",
