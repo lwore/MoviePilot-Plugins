@@ -155,6 +155,7 @@ class MediaRelease(_PluginBase):
                 meta.begin_episode = episode_num
             if year:
                 meta.year = year
+
             if mtype == MediaType.MOVIE:
                 search_medias = self.tmdb.search_movies(meta.name, meta.year)
             else:
@@ -166,45 +167,140 @@ class MediaRelease(_PluginBase):
                 noexist_medias.append(media_name)
                 continue
 
+            # 电视剧：如果用户没有指定季，则订阅该剧所有已存在的季（跳过 Season 0 specials）
+            tv_seasons_to_subscribe: Optional[List[int]] = None
+            if mtype == MediaType.TV and not season_num:
+                try:
+                    tv_detail = self.tmdb.get_info(MediaType.TV, tmdbid=None)  # 占位，避免lint；实际在 mediainfo 循环里取
+                except Exception:
+                    tv_detail = None
+                # 注意：tv_detail 需要 mediainfo.tmdb_id，因此在下面 mediainfo 循环中再获取
+
             for mediainfo in search_medias:
-                # 查询缺失的媒体信息
-                exist_flag, _ = self.downloadchain.get_no_exists_info(meta=meta, mediainfo=mediainfo)
-                if exist_flag:
-                    logger.warn(f'{mediainfo.title_year} 媒体库中已存在')
+                # 电影按原逻辑：只处理一次
+                if mtype == MediaType.MOVIE:
+                    # 查询缺失的媒体信息
+                    exist_flag, _ = self.downloadchain.get_no_exists_info(meta=meta, mediainfo=mediainfo)
+                    if exist_flag:
+                        logger.warn(f'{mediainfo.title_year} 媒体库中已存在')
+                        continue
+
+                    # 判断用户是否已经添加订阅（电影不需要传meta）
+                    if self.subscribechain.exists(mediainfo=mediainfo):
+                        logger.warn(f'{mediainfo.title_year} 订阅已存在')
+                        continue
+
+                    # 开始订阅
+                    logger.info(
+                        f"开始订阅 {mtype.value} {mediainfo.title_year} TMDBID {mediainfo.tmdb_id}")
+                    # 添加订阅
+                    self.subscribechain.add(title=mediainfo.title,
+                                            year=mediainfo.year,
+                                            mtype=mediainfo.type,
+                                            tmdbid=mediainfo.tmdb_id,
+                                            doubanid=mediainfo.douban_id,
+                                            exist_ok=True,
+                                            username="影视将映订阅")
+
+                    # 存储历史记录
+                    history.append({
+                        "title": mediainfo.title,
+                        "type": mtype.value,
+                        "year": mediainfo.year,
+                        "poster": mediainfo.get_poster_image(),
+                        "overview": mediainfo.overview,
+                        "tmdbid": mediainfo.tmdb_id,
+                        "doubanid": mediainfo.douban_id,
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "unique": f"mediarelease: {mediainfo.title} (DB:{mediainfo.tmdb_id})"
+                    })
                     continue
 
-                # 判断用户是否已经添加订阅
-                if self.subscribechain.exists(mediainfo=mediainfo):
-                    logger.warn(f'{mediainfo.title_year} 订阅已存在')
-                    continue
+                # 电视剧：决定要订阅哪些季
+                seasons_to_subscribe: List[int]
+                if season_num:
+                    # 用户指定季：只订阅该季
+                    seasons_to_subscribe = [season_num]
+                else:
+                    # 用户未指定季：订阅所有已存在的季
+                    tv_detail = {}
+                    try:
+                        # 这里依赖 MoviePilot v2 的 tmdbapi 返回 dict，包含 seasons / number_of_seasons
+                        tv_detail = self.tmdb.get_info(MediaType.TV, mediainfo.tmdb_id) or {}
+                    except Exception as e:
+                        logger.warn(f"{mediainfo.title_year} 获取季信息失败：{e}")
+                        tv_detail = {}
 
-                # 开始订阅
-                logger.info(
-                    f"开始订阅 {mtype.value} {mediainfo.title_year} TMDBID {mediainfo.tmdb_id}")
-                # 添加订阅
-                self.subscribechain.add(title=mediainfo.title,
-                                        year=mediainfo.year,
-                                        mtype=mediainfo.type,
-                                        tmdbid=mediainfo.tmdb_id,
-                                        doubanid=mediainfo.douban_id,
-                                        exist_ok=True,
-                                        username="影视将映订阅")
+                    season_numbers: List[int] = []
+                    for s in (tv_detail.get("seasons") or []):
+                        try:
+                            sn = int(s.get("season_number"))
+                        except Exception:
+                            continue
+                        if sn >= 1:
+                            season_numbers.append(sn)
+                    season_numbers = sorted(set(season_numbers))
 
-                # 存储历史记录
-                history.append({
-                    "title": mediainfo.title,
-                    "type": mtype.value,
-                    "year": mediainfo.year,
-                    "poster": mediainfo.get_poster_image(),
-                    "overview": mediainfo.overview,
-                    "tmdbid": mediainfo.tmdb_id,
-                    "doubanid": mediainfo.douban_id,
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "unique": f"mediarelease: {mediainfo.title} (DB:{mediainfo.tmdb_id})"
-                })
+                    if season_numbers:
+                        seasons_to_subscribe = season_numbers
+                    else:
+                        try:
+                            nos = int(tv_detail.get("number_of_seasons") or 0)
+                        except Exception:
+                            nos = 0
+                        if nos > 0:
+                            seasons_to_subscribe = list(range(1, nos + 1))
+                        else:
+                            # 兜底：至少订阅第1季
+                            seasons_to_subscribe = [1]
+
+                # 逐季处理：不使用 deepcopy，通过临时修改 meta.begin_season 来做到“按季判重/按季判断媒体库”
+                orig_begin_season = getattr(meta, "begin_season", None)
+                try:
+                    for s in seasons_to_subscribe:
+                        meta.begin_season = s
+
+                        # 查询缺失的媒体信息（按季）
+                        exist_flag, _ = self.downloadchain.get_no_exists_info(meta=meta, mediainfo=mediainfo)
+                        if exist_flag:
+                            logger.warn(f'{mediainfo.title_year} S{s:02d} 媒体库中已存在')
+                            continue
+
+                        # 判断用户是否已经添加订阅（必须传 meta 才会按季判重）
+                        if self.subscribechain.exists(mediainfo=mediainfo, meta=meta):
+                            logger.warn(f'{mediainfo.title_year} S{s:02d} 订阅已存在')
+                            continue
+
+                        # 开始订阅
+                        logger.info(f"开始订阅 {mtype.value} {mediainfo.title_year} S{s:02d} TMDBID {mediainfo.tmdb_id}")
+
+                        # 添加订阅（显式传 season，否则 add() 会默认 season=1）
+                        self.subscribechain.add(title=mediainfo.title,
+                                                year=mediainfo.year,
+                                                mtype=mediainfo.type,
+                                                tmdbid=mediainfo.tmdb_id,
+                                                doubanid=mediainfo.douban_id,
+                                                season=s,
+                                                exist_ok=True,
+                                                username="影视将映订阅")
+
+                        # 存储历史记录（带 season，避免不同季互相覆盖/删除）
+                        history.append({
+                            "title": mediainfo.title,
+                            "type": mtype.value,
+                            "year": mediainfo.year,
+                            "season": s,
+                            "poster": mediainfo.get_poster_image(),
+                            "overview": mediainfo.overview,
+                            "tmdbid": mediainfo.tmdb_id,
+                            "doubanid": mediainfo.douban_id,
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "unique": f"mediarelease: {mediainfo.title} (DB:{mediainfo.tmdb_id}) S{s}"
+                        })
+                finally:
+                    meta.begin_season = orig_begin_season
 
         logger.info(f"{mtype.value} 将映订阅任务完成")
-
         return noexist_medias, history
 
     @eventmanager.register(EventType.PluginAction)
