@@ -46,4 +46,25 @@ class TMDBSubscribe(_PluginBase):
     # 允许写法：tmdb=123 / tmdb:123 / tmdbid=123 / TMDB=123
     _re_tmdb = re.compile(r"(?:tmdbid|tmdb)\s*[:=]\s*(\d+)", re.IGNORECASE)
 
-    def init
+    def init_plugin(self, config: dict = None):
+        self.downloadchain = DownloadChain()
+        self.subscribechain = SubscribeChain()
+        self.tmdb = TmdbApi()
+        self.stop_service()
+
+        if config:
+            self._enabled = config.get("enabled")
+            self._onlyonce = config.get("onlyonce")
+            self._cron = config.get("cron")
+            self._clear = config.get("clear")
+            self._movies = config.get("movies")
+            self._tvs = config.get("tvs")
+
+            if self._clear:
+                self.del_data(key="history")
+                self._clear = False
+                self.__update_config()
+                logger.info("订阅历史清理完成")
+
+            if self._enabled or self._onlyonce:
+                self._scheduler = BackgroundScheduler(timezone
