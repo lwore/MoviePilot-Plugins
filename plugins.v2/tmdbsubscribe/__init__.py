@@ -33,7 +33,6 @@ class TMDBSubscribe(_PluginBase):
     auth_level = 2
 
 
-    # 私有属性
     _enabled: bool = False
     _onlyonce: bool = False
     _cron: str = ""
@@ -45,14 +44,13 @@ class TMDBSubscribe(_PluginBase):
     _movies = None
     _tvs = None
 
-    # 允许写法：tmdb=123 / tmdb:123 / tmdbid=123 / TMDB=123
+    # 支持：tmdb=123 / tmdb:123 / tmdbid=123 / TMDB=123
     _re_tmdb = re.compile(r"(?:tmdbid|tmdb)\s*[:=]\s*(\d+)", re.IGNORECASE)
 
     def init_plugin(self, config: dict = None):
         self.downloadchain = DownloadChain()
         self.subscribechain = SubscribeChain()
         self.tmdb = TmdbApi()
-        # 停止现有任务
         self.stop_service()
 
         if not config:
@@ -65,7 +63,6 @@ class TMDBSubscribe(_PluginBase):
         self._movies = config.get("movies")
         self._tvs = config.get("tvs")
 
-        # 清理插件订阅历史
         if self._clear:
             self.del_data(key="history")
             self._clear = False
@@ -75,10 +72,8 @@ class TMDBSubscribe(_PluginBase):
         if not (self._enabled or self._onlyonce):
             return
 
-        # 定时服务
         self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
-        # 立即运行一次
         if self._onlyonce:
             logger.info("影视将映订阅服务启动，立即运行一次")
             self._scheduler.add_job(
@@ -87,11 +82,9 @@ class TMDBSubscribe(_PluginBase):
                 run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
                 name="影视将映订阅"
             )
-            # 关闭一次性开关
             self._onlyonce = False
             self.__update_config()
 
-        # 周期运行
         if self._cron:
             try:
                 self._scheduler.add_job(
@@ -103,15 +96,11 @@ class TMDBSubscribe(_PluginBase):
                 logger.error(f"定时任务配置错误：{err}")
                 self.systemmessage.put(f"执行周期配置错误：{err}")
 
-        # 启动任务
         if self._scheduler.get_jobs():
             self._scheduler.print_jobs()
             self._scheduler.start()
 
     def __release(self):
-        """
-        影视将映订阅
-        """
         if not self._movies and not self._tvs:
             logger.warn("暂无作品订阅，停止运行")
             return
@@ -135,13 +124,9 @@ class TMDBSubscribe(_PluginBase):
 
     @staticmethod
     def _split_items(medias: str) -> List[str]:
-        """
-        支持英文逗号和换行分隔
-        """
         if not medias:
             return []
         medias = medias.replace("\r\n", "\n")
-        # 先按换行拆，再把每行按逗号拆
         items: List[str] = []
         for line in medias.split("\n"):
             line = line.strip()
@@ -162,6 +147,31 @@ class TMDBSubscribe(_PluginBase):
         except Exception:
             return None
 
+    def _tv_seasons_from_tmdb_detail(self, tv_detail: dict) -> List[int]:
+        """
+        从 TMDB TV 详情中提取所有季号，默认跳过 Season 0 specials。
+        """
+        season_numbers: List[int] = []
+        for s in (tv_detail.get("seasons") or []):
+            try:
+                sn = int(s.get("season_number"))
+            except Exception:
+                continue
+            if sn >= 1:
+                season_numbers.append(sn)
+        season_numbers = sorted(set(season_numbers))
+        if season_numbers:
+            return season_numbers
+
+        try:
+            nos = int(tv_detail.get("number_of_seasons") or 0)
+        except Exception:
+            nos = 0
+        if nos > 0:
+            return list(range(1, nos + 1))
+
+        return [1]
+
     def __subscribe(self, medias, mtype: MediaType, history):
         noexist_medias = []
         items = self._split_items(medias)
@@ -170,11 +180,10 @@ class TMDBSubscribe(_PluginBase):
             if not media_name:
                 continue
 
-            # 1) 如果用户在条目里写了 tmdb=xxxx，则优先直接用 tmdbid
             tmdbid_override = self._extract_tmdbid(media_name)
 
-            # 2) 解析标题/年份/季
-            _, key_word, season_num, episode_num, year, content = StringUtils.get_keyword(media_name)
+            # 解析标题/年份/季（用户如果写了 S02，则只订该季）
+            _, key_word, season_num, episode_num, year, _content = StringUtils.get_keyword(media_name)
 
             meta = MetaInfo(key_word)
             meta.type = mtype
@@ -185,11 +194,8 @@ class TMDBSubscribe(_PluginBase):
             if year:
                 meta.year = year
 
-            # 电影：如果给了 tmdbid，就不搜索，直接订阅
+            # 电影：tmdb=xxx 直接订阅
             if mtype == MediaType.MOVIE and tmdbid_override:
-                # 直接用 SubscribeChain.add 让它内部 recognize_media
-                # 先做一次存在性检查（依赖 add 的识别结果做库检查不太方便，所以直接让 add 的 exist_ok 兜底；
-                # 这里额外做 subscribe 判重：需要 mediainfo，成本较高，不做也行）
                 logger.info(f"开始订阅 电影 {meta.name} (tmdb={tmdbid_override})")
                 self.subscribechain.add(
                     title=meta.name,
@@ -199,8 +205,6 @@ class TMDBSubscribe(_PluginBase):
                     exist_ok=True,
                     username="影视将映订阅"
                 )
-
-                # 记录历史（title/海报等需要识别后的 mediainfo，这里拿不到；先记录最关键字段）
                 history.append({
                     "title": meta.name,
                     "type": mtype.value,
@@ -214,7 +218,54 @@ class TMDBSubscribe(_PluginBase):
                 })
                 continue
 
-            # 否则走原来的搜索流程（电影未给 tmdbid / 电视剧）
+            # 剧集：tmdb=xxx 直接订阅，并订阅所有季（除非用户显式给了 season_num）
+            if mtype == MediaType.TV and tmdbid_override:
+                logger.info(f"开始订阅 电视剧 {meta.name} (tmdb={tmdbid_override})")
+
+                tv_detail = {}
+                try:
+                    tv_detail = self.tmdb.get_info(MediaType.TV, tmdbid_override) or {}
+                except Exception as e:
+                    logger.warn(f"{meta.name} (tmdb={tmdbid_override}) 获取季信息失败：{e}")
+                    tv_detail = {}
+
+                seasons_to_subscribe = [season_num] if season_num else self._tv_seasons_from_tmdb_detail(tv_detail)
+
+                orig_begin_season = getattr(meta, "begin_season", None)
+                try:
+                    for s in seasons_to_subscribe:
+                        meta.begin_season = s
+
+                        # 这里 mediainfo 不好构造完整对象（需要更多详情），因此库存在性检查只能依赖订阅链侧处理。
+                        # 但订阅判重可以用 subscribechain.add 内部 exist_ok 兜底；我们仍然尽量按季写入。
+                        self.subscribechain.add(
+                            title=meta.name,
+                            year=meta.year,
+                            mtype=MediaType.TV,
+                            tmdbid=tmdbid_override,
+                            season=s,
+                            exist_ok=True,
+                            username="影视将映订阅"
+                        )
+
+                        history.append({
+                            "title": meta.name,
+                            "type": mtype.value,
+                            "year": meta.year,
+                            "season": s,
+                            "poster": "",
+                            "overview": "",
+                            "tmdbid": tmdbid_override,
+                            "doubanid": None,
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "unique": f"mediarelease: {meta.name} (TMDB:{tmdbid_override}) S{s}"
+                        })
+                finally:
+                    meta.begin_season = orig_begin_season
+
+                continue
+
+            # 未给 tmdbid：走原搜索逻辑
             if mtype == MediaType.MOVIE:
                 search_medias = self.tmdb.search_movies(meta.name, meta.year)
             else:
@@ -227,6 +278,7 @@ class TMDBSubscribe(_PluginBase):
                 continue
 
             for mediainfo in search_medias:
+                # 电影（搜索分支）
                 if mtype == MediaType.MOVIE:
                     exist_flag, _ = self.downloadchain.get_no_exists_info(meta=meta, mediainfo=mediainfo)
                     if exist_flag:
@@ -261,7 +313,7 @@ class TMDBSubscribe(_PluginBase):
                     })
                     continue
 
-                # 电视剧：若用户指定季，只订该季；否则订阅所有季
+                # 剧集（搜索分支）：显式季 -> 单季；否则订阅所有季
                 if season_num:
                     seasons_to_subscribe = [season_num]
                 else:
@@ -271,25 +323,7 @@ class TMDBSubscribe(_PluginBase):
                     except Exception as e:
                         logger.warn(f"{mediainfo.title_year} 获取季信息失败：{e}")
                         tv_detail = {}
-
-                    season_numbers: List[int] = []
-                    for s in (tv_detail.get("seasons") or []):
-                        try:
-                            sn = int(s.get("season_number"))
-                        except Exception:
-                            continue
-                        if sn >= 1:
-                            season_numbers.append(sn)
-                    season_numbers = sorted(set(season_numbers))
-
-                    if season_numbers:
-                        seasons_to_subscribe = season_numbers
-                    else:
-                        try:
-                            nos = int(tv_detail.get("number_of_seasons") or 0)
-                        except Exception:
-                            nos = 0
-                        seasons_to_subscribe = list(range(1, nos + 1)) if nos > 0 else [1]
+                    seasons_to_subscribe = self._tv_seasons_from_tmdb_detail(tv_detail)
 
                 orig_begin_season = getattr(meta, "begin_season", None)
                 try:
@@ -349,7 +383,7 @@ class TMDBSubscribe(_PluginBase):
             if len(args) < 2:
                 logger.error(f"参数错误：{event_data} 电影/电视剧 名称 年份")
                 self.post_message(channel=event.event_data.get("channel"),
-                                  title=f"参数错误！格式：电影/电视剧 名称 年份！",
+                                  title="参数错误！格式：电影/电视剧 名称 年份！",
                                   userid=event.event_data.get("user"))
                 return
 
@@ -366,9 +400,9 @@ class TMDBSubscribe(_PluginBase):
                                               title=f"{content} 已在电影列表中！",
                                               userid=event.event_data.get("user"))
                         return
-                    else:
-                        movies.append(str(content))
+                    movies.append(str(content))
                     self._movies = ",".join(movies)
+
                 self.__update_config()
                 if event.event_data.get("user"):
                     self.post_message(channel=event.event_data.get("channel"),
@@ -387,9 +421,9 @@ class TMDBSubscribe(_PluginBase):
                                               title=f"{content} 已在电视剧列表中！",
                                               userid=event.event_data.get("user"))
                         return
-                    else:
-                        tvs.append(str(content))
+                    tvs.append(str(content))
                     self._tvs = ",".join(tvs)
+
                 self.__update_config()
                 if event.event_data.get("user"):
                     self.post_message(channel=event.event_data.get("channel"),
@@ -398,7 +432,7 @@ class TMDBSubscribe(_PluginBase):
             else:
                 logger.error(f"参数错误：{event_data} 电影/电视剧 名称 年份")
                 self.post_message(channel=event.event_data.get("channel"),
-                                  title=f"参数错误！格式：电影/电视剧 名称 年份！",
+                                  title="参数错误！格式：电影/电视剧 名称 年份！",
                                   userid=event.event_data.get("user"))
                 return
 
@@ -413,9 +447,6 @@ class TMDBSubscribe(_PluginBase):
         })
 
     def delete_history(self, key: str, apikey: str):
-        """
-        删除同步历史记录
-        """
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
         historys = self.get_data("history")
@@ -461,23 +492,17 @@ class TMDBSubscribe(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}
-                                ]
+                                "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {"component": "VSwitch", "props": {"model": "onlyonce", "label": "立即运行一次"}}
-                                ]
+                                "content": [{"component": "VSwitch", "props": {"model": "onlyonce", "label": "立即运行一次"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {"component": "VSwitch", "props": {"model": "clear", "label": "清理订阅记录"}}
-                                ]
+                                "content": [{"component": "VSwitch", "props": {"model": "clear", "label": "清理订阅记录"}}]
                             },
                         ]
                     },
@@ -490,11 +515,7 @@ class TMDBSubscribe(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VCronField",
-                                        "props": {
-                                            "model": "cron",
-                                            "label": "执行周期",
-                                            "placeholder": "5位cron表达式，留空自动"
-                                        }
+                                        "props": {"model": "cron", "label": "执行周期", "placeholder": "5位cron表达式，留空自动"}
                                     }
                                 ]
                             },
@@ -506,32 +527,12 @@ class TMDBSubscribe(_PluginBase):
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "movies",
-                                            "label": "电影",
-                                            "rows": 4,
-                                            "placeholder": "电影名称(多个英文逗号或换行分隔)"
-                                        }
-                                    }
-                                ]
+                                "content": [{"component": "VTextarea", "props": {"model": "movies", "label": "电影", "rows": 4, "placeholder": "电影名称(多个英文逗号或换行分隔，可加 tmdb=xxxx)"}}]
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "tvs",
-                                            "label": "电视剧",
-                                            "rows": 4,
-                                            "placeholder": "电视剧名称(多个英文逗号或换行分隔)"
-                                        }
-                                    }
-                                ]
+                                "content": [{"component": "VTextarea", "props": {"model": "tvs", "label": "电视剧", "rows": 4, "placeholder": "电视剧名称(多个英文逗号或换行分隔，可加 tmdb=xxxx)"}}]
                             }
                         ]
                     },
@@ -549,11 +550,7 @@ class TMDBSubscribe(_PluginBase):
     def get_page(self) -> List[dict]:
         historys = self.get_data("history")
         if not historys:
-            return [{
-                "component": "div",
-                "text": "暂无数据",
-                "props": {"class": "text-center"}
-            }]
+            return [{"component": "div", "text": "暂无数据", "props": {"class": "text-center"}}]
 
         historys = sorted(historys, key=lambda x: x.get("time"), reverse=True)
         contents = []
@@ -572,13 +569,8 @@ class TMDBSubscribe(_PluginBase):
                     {
                         "component": "VDialogCloseBtn",
                         "props": {"innerClass": "absolute top-0 right-0"},
-                        "events": {
-                            "click": {
-                                "api": "plugin/MediaRelease/delete_history",
-                                "method": "get",
-                                "params": {"key": unique_key, "apikey": settings.API_TOKEN}
-                            }
-                        }
+                        "events": {"click": {"api": "plugin/MediaRelease/delete_history", "method": "get",
+                                             "params": {"key": unique_key, "apikey": settings.API_TOKEN}}}
                     },
                     {
                         "component": "div",
@@ -609,10 +601,7 @@ class TMDBSubscribe(_PluginBase):
                                         "content": [
                                             {
                                                 "component": "a",
-                                                "props": {
-                                                    "href": f"https://movie.douban.com/subject/{doubanid}",
-                                                    "target": "_blank"
-                                                },
+                                                "props": {"href": f"https://movie.douban.com/subject/{doubanid}", "target": "_blank"},
                                                 "text": title
                                             }
                                         ]
@@ -626,16 +615,9 @@ class TMDBSubscribe(_PluginBase):
                 ]
             })
 
-        return [{
-            "component": "div",
-            "props": {"class": "grid gap-3 grid-info-card"},
-            "content": contents
-        }]
+        return [{"component": "div", "props": {"class": "grid gap-3 grid-info-card"}, "content": contents}]
 
     def stop_service(self):
-        """
-        退出插件
-        """
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
